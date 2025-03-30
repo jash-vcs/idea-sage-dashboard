@@ -8,6 +8,10 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Send, MessageSquare, PieChart, Search, Scale, TrendingUp, BadgeDollarSign, Users, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getIdea, getChatHistory, saveChatMessage } from "@/lib/ideaService";
+import { ApiKeyInput } from "@/components/ApiKeyInput";
+import { generateChatResponse, streamGeminiResponse } from "@/lib/geminiService";
+import { ChatMessageSkeleton } from "@/components/SkeletonLoaders";
+import { StreamingText } from "@/components/StreamingText";
 
 const agentConfig = {
   "assistant": {
@@ -58,8 +62,10 @@ const ChatPage = () => {
   const { ideaId, agentId } = useParams<{ ideaId: string; agentId: string }>();
   const [idea, setIdea] = useState<any>(null);
   const [messages, setMessages] = useState<any[]>([]);
+  const [streamingMessage, setStreamingMessage] = useState("");
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [initialLoad, setInitialLoad] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load idea and chat history
@@ -89,13 +95,15 @@ const ChatPage = () => {
       } else {
         setMessages(history);
       }
+      
+      setInitialLoad(false);
     }
   }, [ideaId, agentId]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, streamingMessage]);
 
   if (!ideaId || !agentId || !agentConfig[agentId as keyof typeof agentConfig]) {
     return <Navigate to="/" />;
@@ -104,7 +112,7 @@ const ChatPage = () => {
   const agent = agentConfig[agentId as keyof typeof agentConfig];
 
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() || isLoading || !idea) return;
     
     // Add user message
     const userMessage = {
@@ -120,34 +128,53 @@ const ChatPage = () => {
     setMessages(prev => [...prev, userMessage]);
     setInput("");
     setIsLoading(true);
+    setStreamingMessage("");
     
-    // Simulate AI response (in a real app, this would call an AI service)
-    setTimeout(() => {
-      const responses = [
-        "That's a great question about your idea. Based on my analysis, I would recommend focusing on this area first.",
-        "I've analyzed similar startups in this space, and I think your approach has several advantages.",
-        "Let me break this down for you. There are three key factors to consider here...",
-        "From my perspective as a specialized consultant, I'd suggest revisiting your assumptions about the market size.",
-        "You're on the right track, but have you considered approaching this from a different angle?",
-      ];
+    // Prepare message history for API
+    const messageHistory = messages.map(msg => ({
+      content: msg.content,
+      isUser: msg.isUser
+    }));
+    
+    try {
+      // Start streaming the response
+      let fullResponse = "";
       
-      const responseMessage = {
-        id: Date.now().toString(),
-        ideaId,
-        agentId,
-        content: responses[Math.floor(Math.random() * responses.length)],
-        isUser: false,
-        timestamp: new Date().toISOString()
-      };
-      
-      saveChatMessage(responseMessage);
-      setMessages(prev => [...prev, responseMessage]);
+      streamGeminiResponse(
+        input,
+        `You are acting as a ${agent.name} for the startup idea "${idea.title}". 
+        Idea Description: ${idea.description}
+        
+        Keep your responses helpful, concise, and practical.`,
+        (chunk) => {
+          fullResponse += chunk;
+          setStreamingMessage(fullResponse);
+        },
+        () => {
+          // When streaming is complete, save the full message
+          const responseMessage = {
+            id: Date.now().toString(),
+            ideaId,
+            agentId,
+            content: fullResponse,
+            isUser: false,
+            timestamp: new Date().toISOString()
+          };
+          
+          saveChatMessage(responseMessage);
+          setMessages(prev => [...prev, responseMessage]);
+          setStreamingMessage("");
+          setIsLoading(false);
+        }
+      );
+    } catch (error) {
+      console.error("Error generating response:", error);
       setIsLoading(false);
-    }, 1500);
+    }
   };
 
   return (
-    <div className="flex h-screen bg-slate-900 text-white">
+    <div className="flex h-screen bg-black text-white">
       <Sidebar ideaId={ideaId} />
       
       <div className="flex-1 flex flex-col">
@@ -167,40 +194,72 @@ const ChatPage = () => {
           </div>
         </div>
         
-        <div className="flex-1 overflow-y-auto p-4">
-          <div className="max-w-3xl mx-auto space-y-4">
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                className={cn(
-                  "flex",
-                  message.isUser ? "justify-end" : "justify-start"
+        <div className="flex-1 overflow-y-auto p-4 bg-[linear-gradient(to_bottom,rgba(0,0,0,0),rgba(0,0,0,0.8))]">
+          <div className="max-w-3xl mx-auto">
+            {initialLoad ? (
+              <div className="flex justify-center items-center h-32">
+                <Loader2 className="h-6 w-6 text-blue-500 animate-spin" />
+              </div>
+            ) : (
+              <>
+                {/* First time user assistance */}
+                {messages.length <= 1 && (
+                  <div className="bg-blue-900/20 backdrop-blur-sm border border-blue-800/50 rounded-lg p-4 mb-6">
+                    <h3 className="font-medium text-blue-400 mb-2">Getting Started</h3>
+                    <p className="text-sm text-slate-300 mb-2">
+                      This AI consultant has been primed with information about your idea. You can ask specific questions
+                      about your business concept, request advice, or explore strategic options.
+                    </p>
+                    <ApiKeyInput />
+                  </div>
                 )}
-              >
-                <div
-                  className={cn(
-                    "max-w-[80%] rounded-lg p-4",
-                    message.isUser
-                      ? "bg-blue-600 text-white"
-                      : "bg-slate-800 text-slate-200"
+                
+                <div className="space-y-4">
+                  {messages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={cn(
+                        "flex",
+                        message.isUser ? "justify-end" : "justify-start"
+                      )}
+                    >
+                      <div
+                        className={cn(
+                          "max-w-[85%] rounded-lg p-4",
+                          message.isUser
+                            ? "bg-blue-600 text-white"
+                            : "bg-slate-800/90 text-slate-200"
+                        )}
+                      >
+                        <p className="whitespace-pre-line">{message.content}</p>
+                        <p className="text-xs opacity-70 mt-1">
+                          {new Date(message.timestamp).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                  
+                  {/* Streaming response */}
+                  {streamingMessage && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[85%] rounded-lg p-4 bg-slate-800/90 text-slate-200">
+                        <StreamingText text={streamingMessage} className="whitespace-pre-line" />
+                        <div className="text-xs opacity-70 mt-1">
+                          {new Date().toLocaleTimeString()}
+                        </div>
+                      </div>
+                    </div>
                   )}
-                >
-                  <p>{message.content}</p>
-                  <p className="text-xs opacity-70 mt-1">
-                    {new Date(message.timestamp).toLocaleTimeString()}
-                  </p>
+                  
+                  {/* Loading indicator */}
+                  {isLoading && !streamingMessage && (
+                    <ChatMessageSkeleton />
+                  )}
+                  
+                  <div ref={messagesEndRef} />
                 </div>
-              </div>
-            ))}
-            {isLoading && (
-              <div className="flex justify-start">
-                <div className="bg-slate-800 rounded-lg p-4 flex items-center">
-                  <Loader2 className="h-5 w-5 text-blue-500 animate-spin mr-2" />
-                  <p className="text-slate-300">Thinking...</p>
-                </div>
-              </div>
+              </>
             )}
-            <div ref={messagesEndRef} />
           </div>
         </div>
         
@@ -217,17 +276,21 @@ const ChatPage = () => {
                   }
                 }}
                 placeholder={`Ask the ${agent.name} about your idea...`}
-                className="min-h-[60px] bg-slate-800 border-slate-700 text-white resize-none"
+                className="min-h-[60px] bg-slate-800/90 border-slate-700 text-white resize-none"
               />
               <Button
                 onClick={handleSend}
-                disabled={isLoading || !input.trim()}
+                disabled={isLoading || !input.trim() || initialLoad}
                 className={cn(
                   "px-4",
                   isLoading ? "bg-slate-700" : "bg-blue-600 hover:bg-blue-700"
                 )}
               >
-                <Send className="h-5 w-5" />
+                {isLoading ? (
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                ) : (
+                  <Send className="h-5 w-5" />
+                )}
               </Button>
             </div>
           </div>

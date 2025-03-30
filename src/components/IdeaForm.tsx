@@ -1,12 +1,14 @@
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/use-toast";
-import { Loader2 } from "lucide-react";
-import { saveIdea, generateAnalysis } from "@/lib/ideaService";
+import { Edit, Loader2, Save } from "lucide-react";
+import { saveIdea } from "@/lib/ideaService";
+import { generateIdeaTitle, generateAnalysisWithGemini } from "@/lib/geminiService";
+import { ApiKeyInput } from "@/components/ApiKeyInput";
 
 interface IdeaFormProps {
   onClose?: () => void;
@@ -16,16 +18,43 @@ const IdeaForm = ({ onClose }: IdeaFormProps) => {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
+  const [isTitleEditable, setIsTitleEditable] = useState(false);
   const navigate = useNavigate();
   const { toast } = useToast();
+
+  // Generate title when description changes
+  useEffect(() => {
+    const debounceTimer = setTimeout(() => {
+      if (description.trim().length > 20 && !title) {
+        generateTitle();
+      }
+    }, 1000);
+
+    return () => clearTimeout(debounceTimer);
+  }, [description]);
+
+  const generateTitle = async () => {
+    if (!description.trim() || isGeneratingTitle) return;
+    
+    setIsGeneratingTitle(true);
+    try {
+      const generatedTitle = await generateIdeaTitle(description);
+      setTitle(generatedTitle);
+    } catch (error) {
+      console.error("Error generating title:", error);
+    } finally {
+      setIsGeneratingTitle(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!title.trim() || !description.trim()) {
+    if (!description.trim()) {
       toast({
         title: "Missing information",
-        description: "Please provide both a title and description for your idea.",
+        description: "Please provide a description for your idea.",
         variant: "destructive"
       });
       return;
@@ -34,26 +63,57 @@ const IdeaForm = ({ onClose }: IdeaFormProps) => {
     setIsLoading(true);
     
     try {
-      // Save the idea and generate a basic analysis
+      // Use generated title or fallback
+      const finalTitle = title.trim() || "My Startup Idea";
+      
+      // Save the idea
       const ideaId = await saveIdea({
         id: Date.now().toString(),
-        title,
+        title: finalTitle,
         description,
         createdAt: new Date().toISOString()
       });
       
-      // Generate the analysis in the background
-      await generateAnalysis(ideaId);
-      
       toast({
         title: "Idea submitted!",
-        description: "Redirecting you to your dashboard...",
+        description: "Generating analysis with Gemini...",
       });
+      
+      // Generate the analysis with Gemini
+      try {
+        const analysis = await generateAnalysisWithGemini({
+          title: finalTitle,
+          description
+        });
+        
+        // Save the analysis with the actual data
+        const analysisToSave = {
+          id: Date.now().toString(),
+          ideaId,
+          problemAnalysis: analysis.problemAnalysis || "Analysis in progress...",
+          targetMarket: analysis.targetMarket || "Analysis in progress...",
+          businessModel: analysis.businessModel || "Analysis in progress...",
+          legalConsiderations: analysis.legalConsiderations || "Analysis in progress...",
+          growthStrategy: analysis.growthStrategy || "Analysis in progress...",
+          competitorAnalysis: analysis.competitorAnalysis || "Analysis in progress...",
+          fundingRequirements: analysis.fundingRequirements || "Analysis in progress...",
+          createdAt: new Date().toISOString()
+        };
+        
+        // Import and use saveAnalysis from ideaService
+        const { saveAnalysis } = await import("@/lib/ideaService");
+        saveAnalysis(analysisToSave);
+        
+        toast.success("Analysis completed!");
+      } catch (error) {
+        console.error("Error generating analysis:", error);
+        // Still navigate to dashboard even if analysis fails
+      }
       
       // Redirect to the dashboard
       setTimeout(() => {
         navigate(`/dashboard/${ideaId}`);
-      }, 1500);
+      }, 500);
       
     } catch (error) {
       console.error("Error saving idea:", error);
@@ -68,16 +128,39 @@ const IdeaForm = ({ onClose }: IdeaFormProps) => {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
+      <ApiKeyInput />
+      
+      {/* Title field (auto-generated but editable) */}
       <div>
-        <label className="block text-sm font-medium text-slate-300 mb-1">
-          Idea Title
-        </label>
-        <Input
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          className="bg-slate-800/70 border-slate-700 text-white"
-          placeholder="Enter a concise title for your startup idea"
-        />
+        <div className="flex items-center justify-between mb-1">
+          <label className="block text-sm font-medium text-slate-300">
+            Idea Title
+          </label>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-6 text-xs text-slate-400"
+            onClick={() => setIsTitleEditable(!isTitleEditable)}
+          >
+            <Edit size={12} className="mr-1" />
+            {isTitleEditable ? "Auto" : "Edit"}
+          </Button>
+        </div>
+        <div className="relative">
+          <Input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            disabled={!isTitleEditable && !isGeneratingTitle}
+            className={`bg-slate-800/70 border-slate-700 text-white ${isGeneratingTitle ? 'opacity-70' : ''}`}
+            placeholder={isGeneratingTitle ? "Generating title..." : "Auto-generated title"}
+          />
+          {isGeneratingTitle && (
+            <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
+              <Loader2 size={16} className="animate-spin text-slate-400" />
+            </div>
+          )}
+        </div>
       </div>
       
       <div>
@@ -98,14 +181,14 @@ const IdeaForm = ({ onClose }: IdeaFormProps) => {
             type="button" 
             variant="outline" 
             onClick={onClose}
-            className="border-slate-600 text-slate-300 hover:bg-slate-700"
+            className="border-slate-700 text-slate-300 hover:bg-slate-800"
           >
             Cancel
           </Button>
         )}
         <Button 
           type="submit" 
-          disabled={isLoading}
+          disabled={isLoading || !description.trim()}
           className="bg-blue-600 hover:bg-blue-700"
         >
           {isLoading ? (
